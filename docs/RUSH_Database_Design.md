@@ -313,7 +313,7 @@ Participation of one user in one session; stores the final score.
 | `total_score` | INT UNSIGNED |  | NO | DEFAULT 0; Final score written when the session ends (= SUM(user_answer.points_earned)). |
 | `joined_at` | DATETIME |  | NO | DEFAULT CURRENT_TIMESTAMP |
 | `disconnected_at` | DATETIME |  | YES | Set on disconnect during the game; cleared when the participant reconnects. |
-| `finished_at` | DATETIME |  | YES | When the participant answered every question (only the winner can have it, since finishing ends the game). Added 2026-11. |
+| `finished_at` | DATETIME |  | YES | When the participant answered every question. Finishing ends the session for everyone, so at most one participant (the first to finish) has it — which is not necessarily the winner. NULL when the session ended on the global time limit before anyone finished. Added 2026-11. |
 
 * UNIQUE `uq_quiz_attempt_session_user` (session_id, user_id)
 * App rule: Participant must be a room member when the session starts.

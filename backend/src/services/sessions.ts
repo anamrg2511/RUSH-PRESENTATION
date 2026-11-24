@@ -99,9 +99,11 @@ export async function getSessionResult(sessionId: number, userId: number): Promi
   if (!myAttempt && !(await getMembershipRole(s.room_id, userId))) throw notFound('Session');
 
   const standings = await loadStandings(sessionId, s.winner_user_id);
-  // 'completed' when every participant answered all questions; otherwise the deadline ended it.
+  // 'completed' when a player finished all questions (which ends the session); 'time_up' when the
+  // deadline ended it first. A finisher always ends the session, so if the deadline closed it no
+  // one had finished — hence `some`, not `every`.
   const endReason: GameEndReason | null =
-    s.session_status !== 'COMPLETED' ? null : standings.every((x) => x.finished) ? 'completed' : 'time_up';
+    s.session_status !== 'COMPLETED' ? null : standings.some((x) => x.finished) ? 'completed' : 'time_up';
 
   // Max score = points of the questions actually played in this session (locked, so stable).
   const played = await sql<{ total: number | null }>`

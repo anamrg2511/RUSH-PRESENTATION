@@ -49,10 +49,12 @@ Further documentation:
    countdown (`m:ss`, "of 5 min"); it keeps running and never restarts when a player moves to the
    next question.
 4. Each player answers at their own pace and briefly sees their own result after each answer.
-5. **The player with the highest final score wins.** The game ends once every player has answered
-   all of their questions, or when the global time runs out — whichever comes first. Finishing first
-   never overrides a higher score. The server decides; ties are broken by the earliest completion
-   time, so there is always exactly one winner.
+5. **The player with the highest final score wins.** The session ends as soon as the *first* player
+   answers all of their questions, or when the global time runs out — whichever comes first. The
+   first player to finish decides *when* the session ends, not *who* wins: finishing first never
+   overrides a higher score, so a player with more points who has not finished still wins. The
+   server decides; ties are broken by the earliest completion time, so there is always exactly one
+   winner.
 6. If the time runs out first, the game ends and the standings are ranked by score (correct answers
    earn the question's points, speed earns nothing extra); the highest score still wins.
 7. Everybody sees the same winner and final standings; the results page shows each player's own
@@ -351,8 +353,9 @@ page should load. If it does, HTTP and WebSocket (same origin/port) both work.
 ### 9–11. Start and play
 
 With both players in the waiting room, the host presses **Start game**. Both players answer at
-their own pace; the first to finish every question wins and ends the game for everyone, or time
-runs out. Both then see the winner and the final standings; each player's own answers are on the
+their own pace; the first to finish every question ends the game for everyone (or time runs out),
+and the highest final score wins — not necessarily whoever finished first. Both then see the
+winner and the final standings; each player's own answers are on the
 results page. If a browser briefly loses Wi-Fi, it reconnects and resumes at the same question
 with the remaining global time.
 

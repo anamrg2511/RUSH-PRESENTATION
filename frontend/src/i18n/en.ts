@@ -291,7 +291,7 @@ export const en = {
   'play.matchPick': 'Choose…',
   'play.noLeaderboard': 'Scores are revealed at the end.',
   'play.rules': '{t} for the whole quiz · the highest score wins',
-  'play.waitingOthers': 'You finished! Waiting for the other players…',
+  'play.finishing': 'You finished first! Closing the game…',
   'play.totalOf': 'of {t}',
   'play.timeLeftShort': '{t} left',
   'play.youWin': 'You have the highest score — you win!',

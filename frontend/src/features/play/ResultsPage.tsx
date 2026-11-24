@@ -107,7 +107,7 @@ revisión de cada respuesta.
 Responsabilidades principales:
 - Consultar sessionsApi.results.
 - Mostrar puntuación sobre el máximo, aciertos y porcentaje.
-- Mostrar el ganador por terminar primero o el aviso de fin por tiempo (WinnerBanner).
+- Mostrar el ganador por mayor puntuación final o el aviso de fin por tiempo (WinnerBanner).
 - Mostrar la clasificación (Leaderboard) y cada respuesta con la correcta cuando se falló; las
   preguntas a las que no se llegó porque la partida terminó aparecen como no respondidas.
 

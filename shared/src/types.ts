@@ -216,8 +216,9 @@ export interface WinnerDto {
   fullName: string;
 }
 /**
- * Why a session ended: 'completed' = every participant answered all questions before the deadline;
- * 'time_up' = the global time limit expired first. The winner is the highest final score either way.
+ * Why a session ended: 'completed' = the first participant answered all questions, which ends the
+ * session for everyone; 'time_up' = the global time limit expired before anyone finished. The
+ * winner is the highest final score either way, not whoever finished first.
  */
 export type GameEndReason = 'completed' | 'time_up';
 /** Sent to everybody when the game ends. */

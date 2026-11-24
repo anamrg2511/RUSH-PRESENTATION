@@ -141,20 +141,15 @@ test('host and player: room, invitation, quiz, global timer, highest score wins'
   await expect(player.getByRole('timer')).not.toHaveText('2:00');
   await expect(player.getByRole('timer')).toHaveText(/^1:\d\d$/);
 
-  // the player answers the last question first (200 points) and finishes, but finishing first must
-  // NOT win or end the game: the host still has a question left
+  // the player answers the last question first (200 points) and finishes. Finishing first ENDS the
+  // session for everyone immediately — the host, still on the second question, is cut off — but the
+  // winner is decided by score, so the player's higher score (200 vs the host's 0) wins.
   await player.getByRole('radio', { name: /Yes/ }).click();
   await player.getByRole('button', { name: 'Submit answer' }).click();
-  await expect(player.getByText('You finished! Waiting for the other players…')).toBeVisible();
-  await expect(host.getByRole('heading', { name: 'Game over' })).toHaveCount(0);
-
-  // the host finishes last with the lower score → the player's higher score wins
-  await host.getByRole('radio', { name: /No/ }).click();
-  await host.getByRole('button', { name: 'Submit answer' }).click();
   for (const p of [host, player]) await expect(p.getByRole('heading', { name: 'Game over' })).toBeVisible();
   await expect(player.getByText('You have the highest score — you win!')).toBeVisible();
   await expect(host.getByText(`E2E ${playerName} wins with the highest score!`)).toBeVisible();
-  await expect(host.getByRole('button', { name: 'Submit answer' })).toHaveCount(0); // no more interaction
+  await expect(host.getByRole('button', { name: 'Submit answer' })).toHaveCount(0); // the host was cut off
   await player.getByRole('link', { name: 'See my results' }).click();
   await expect(player.getByText('Your score')).toBeVisible();
   await expect(player.getByText('You have the highest score — you win!')).toBeVisible();

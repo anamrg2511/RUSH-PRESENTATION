@@ -15,11 +15,13 @@ import { describeCorrectAnswer, getSessionRow, loadStandings, winnerOf } from '.
  * Rules:
  * - One global deadline per session (quiz.total_time_limit_seconds), set once when the game starts
  *   and never reset. Each player advances through the questions at their own pace.
- * - The game ends when every participant has answered every question, or when the deadline passes,
- *   whichever comes first. One player finishing does not end the game for the others.
- * - The winner is the participant with the highest final score. Ties are broken by the earliest
- *   completion time, then by the lowest user id, so the result is deterministic and
- *   server-authoritative. Answering first never overrides a higher score.
+ * - The session ends as soon as the FIRST player answers every question, or when the deadline
+ *   passes, whichever comes first. The first player to finish decides WHEN the session ends, not
+ *   WHO wins.
+ * - The winner is the participant with the highest final score at that moment. Ties are broken by
+ *   the earliest completion time, then by the lowest user id, so the result is deterministic and
+ *   server-authoritative. Finishing first never overrides a higher score: a player who has more
+ *   points but has not finished still wins.
  */
 
 export interface Emitter {
@@ -296,8 +298,8 @@ export class SessionEngine {
 
   /**
    * A player answers their current question. Each player sees only their own result and then gets
-   * their next question; answering the last question marks them finished but lets the others keep
-   * playing. The winner is decided by final score once everyone is done (or the deadline passes).
+   * their next question; answering the last question marks them finished and ends the session for
+   * everyone. The winner is still decided by final score, not by who finished first.
    */
   async answer(sessionId: number, userId: number, questionId: number, submission: AnswerSubmission): Promise<{ accepted: true; result: QuestionEndDto; finished: boolean }> {
     const s = this.sessions.get(sessionId);
@@ -358,13 +360,13 @@ export class SessionEngine {
       this.emitter.toUser(s.sessionId, userId, 'session:question-end', result);
 
       if (p.index === s.questions.length - 1) {
-        // This player answered the last question. Record their completion time (used to break score
-        // ties) but keep the game running so everyone else can finish — the winner is decided by the
-        // final scores in finish(), not by who finished first. The game ends only once everybody is
-        // done; otherwise the global deadline ends it.
+        // This player answered the last question, so they are the first to finish, which ends the
+        // session for everyone right now. Their completion time is recorded because it breaks score
+        // ties, but it does NOT decide the winner: finish() ranks every player by their final score,
+        // so a player with more points who has not finished still wins.
         p.finishedAt = new Date();
         for (const q of s.questions) p.answered.add(q.questionId);
-        if (this.allFinished(s)) await this.finish(s, 'completed');
+        await this.finish(s, 'completed');
         return { accepted: true as const, result, finished: true };
       }
       p.index += 1;
@@ -382,12 +384,6 @@ export class SessionEngine {
         .executeTakeFirstOrThrow();
       await db.updateTable('quiz_attempt').set({ total_score: Number(total) }).where('attempt_id', '=', p.attemptId).execute();
     }
-  }
-
-  /** Every participant still in the session has answered all of their questions. */
-  private allFinished(s: LiveSession): boolean {
-    for (const p of s.participants.values()) if (!p.finishedAt) return false;
-    return true;
   }
 
   /**
@@ -408,10 +404,12 @@ export class SessionEngine {
   }
 
   /**
-   * Ends the game for everybody, exactly once. The conditional UPDATE (… WHERE session_status =
-   * 'IN_PROGRESS') is the atomic guard: only one caller can move the session to COMPLETED, even if
-   * a final answer and the deadline arrive at the same moment. The winner is then decided from the
-   * persisted scores, so it never depends on who finished first.
+   * Ends the game for everybody, exactly once. Called when the first player finishes all questions
+   * or when the deadline passes. The conditional UPDATE (… WHERE session_status = 'IN_PROGRESS') is
+   * the atomic guard: only one caller can move the session to COMPLETED, even if a final answer and
+   * the deadline arrive at the same moment. Players who had not finished keep the points they
+   * earned; their unanswered questions count as 0. The winner is then decided from the persisted
+   * scores, so it never depends on who finished first.
    */
   private async finish(s: LiveSession, reason: GameEndReason): Promise<void> {
     if (s.status !== 'IN_PROGRESS') return;
@@ -585,14 +583,14 @@ Responsabilidades principales:
 - answer: valida que la pregunta sea la actual de ese jugador y que no haya pasado el tiempo
   global; corrige con gradeAnswer, guarda user_answer, envía al jugador su resultado
   (session:question-end) y su siguiente pregunta (session:question). Si era la última pregunta,
-  marca a ese jugador como terminado (finishedAt) pero los demás siguen jugando; la partida termina
-  cuando todos han terminado o cuando vence el tiempo global.
-- finish: termina la partida una sola vez. El UPDATE condicional (WHERE session_status =
-  'IN_PROGRESS') garantiza que una sola llamada cierra la sesión aunque una respuesta final y el
-  vencimiento del tiempo coincidan. Guarda finished_at, registra con 0 puntos las preguntas no
-  contestadas, calcula total_score y determina el ganador por mayor puntuación final (desempate por
-  menor finished_at y luego menor user_id). Emite session:completed con el motivo, el ganador y la
-  clasificación.
+  marca a ese jugador como terminado (finishedAt) y termina la sesión para todos de inmediato: el
+  primero en terminar decide CUÁNDO acaba la partida, no QUIÉN gana.
+- finish: termina la partida una sola vez, cuando el primer jugador termina o cuando vence el
+  tiempo global. El UPDATE condicional (WHERE session_status = 'IN_PROGRESS') garantiza que una sola
+  llamada cierra la sesión aunque una respuesta final y el vencimiento del tiempo coincidan. Guarda
+  finished_at, registra con 0 puntos las preguntas no contestadas, calcula total_score y determina
+  el ganador por mayor puntuación final (desempate por menor finished_at y luego menor user_id).
+  Emite session:completed con el motivo, el ganador y la clasificación.
 - determineWinner: ganador autoritativo a partir de las puntuaciones ya persistidas.
 - cancel: cierra la sesión como CANCELLED.
 - disconnect: en la sala de espera elimina al jugador; durante la partida solo marca
@@ -622,9 +620,9 @@ Aspectos técnicos importantes:
   desconexiones y las reconexiones para evitar condiciones de carrera.
 - El temporizador global nunca se reinicia al cambiar de pregunta; el servidor (Date.now) decide
   con un margen de 750 ms y el cliente solo muestra la cuenta atrás.
-- Los puntos dependen solo de si la respuesta es correcta; el ganador es quien termina primero.
-- Si nadie termina antes del tiempo límite, no hay ganador por terminar primero y la clasificación
-  usa la puntuación.
+- Los puntos dependen solo de si la respuesta es correcta. La sesión termina en cuanto el primer
+  jugador contesta todas las preguntas (o al vencer el tiempo), pero el ganador es siempre el de
+  mayor puntuación final, no el que terminó primero.
 - timeScale y syncIntervalMs permiten acelerar los tiempos en las pruebas.
 
 Lugar en la arquitectura:

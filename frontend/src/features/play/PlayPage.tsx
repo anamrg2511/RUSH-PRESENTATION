@@ -207,7 +207,7 @@ function Game({ sessionId, roomId, quizTitle }: { sessionId: number; roomId: num
             )}
             {phase.question.index + 1 >= phase.question.total ? (
               <p className="mt-8 flex items-center justify-center gap-2 font-display text-sm font-bold text-cyan">
-                <Spinner className="h-4 w-4" /> {t('play.waitingOthers')}
+                <Spinner className="h-4 w-4" /> {t('play.finishing')}
               </p>
             ) : (
               <p className="mt-8 font-display text-sm font-bold text-muted">{t('play.question', { i: phase.question.index + 1, n: phase.question.total })}</p>
@@ -594,7 +594,7 @@ Responsabilidades principales:
   atrás global (TimerRing, m:ss) basado en el endsAt único del servidor, que no se reinicia al
   cambiar de pregunta.
 - Pantalla de resultado de la respuesta (con el tiempo global restante, ClockLine).
-- FinalStandings: WinnerBanner (ganador por terminar primero o fin por tiempo sin ganador) y
+- FinalStandings: WinnerBanner (ganador por mayor puntuación final, o fin por tiempo sin ganador) y
   Leaderboard.
 
 Elementos importantes:

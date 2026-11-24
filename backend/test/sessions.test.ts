@@ -120,21 +120,20 @@ describe('session lifecycle', () => {
     expect(q2.endsAt).toBe(st.endsAt);
     expect(socketModule.engine.deadlineOf(sessionId)).toBe(st.endsAt);
 
-    // the member races through both questions wrong and finishes FIRST (0 points). Finishing first
-    // must NOT win and must NOT end the game: the owner still has a question left.
+    // the member answers Q1 wrong (0 points) and is still on Q2 — mid-game, not finished
     const q2mP = next<LiveQuestionDto>(sm, 'session:question');
     expect((await answerOpt(sm, sessionId, q1b, 'gamsa')).data?.finished).toBe(false);
     const q2m = await q2mP;
     expect(q2m.endsAt).toBe(st.endsAt);
-    const memberDone = await answerOpt(sm, sessionId, q2m, 'gamsa');
-    expect(memberDone.data?.finished).toBe(true);
-    // the game keeps running and there is no winner yet, because the owner has not finished
+    // the game is still running and there is no winner yet: nobody has finished
     await socketModule.engine.drain(sessionId);
     expect(socketModule.engine.isLive(sessionId)).toBe(true);
     expect(await db.selectFrom('quiz_session').select(['winner_user_id', 'session_status']).where('session_id', '=', sessionId).executeTakeFirstOrThrow())
       .toEqual({ winner_user_id: null, session_status: 'IN_PROGRESS' });
 
-    // the owner answers Q2 correctly and finishes LAST with the higher score (150) → the owner wins
+    // Scenario A: the owner answers Q2 correctly and FINISHES FIRST (150). Finishing first ends the
+    // session for everyone immediately — the member never gets to finish — and here the owner also
+    // has the highest score, so the owner wins.
     const doneO = next<GameEndDto>(so, 'session:completed');
     const doneM = next<GameEndDto>(sm, 'session:completed');
     const last = await answerOpt(so, sessionId, q2, 'annyeong');
@@ -144,10 +143,10 @@ describe('session lifecycle', () => {
     expect(endO).toEqual(endM); // everybody receives the same final results
     expect(endO.reason).toBe('completed');
     expect(endO.winner).toMatchObject({ userId: owner.userId, username: owner.username });
-    // highest final score wins even though the member finished first; the winner is listed first
+    // the member is cut off mid-game with the points earned so far (0) and is not marked finished
     expect(endO.standings.map((s) => [s.userId, s.totalScore, s.isWinner, s.finished])).toEqual([
       [owner.userId, 150, true, true],
-      [member.userId, 0, false, true],
+      [member.userId, 0, false, false],
     ]);
 
     // nobody can answer after the game ended
@@ -159,13 +158,14 @@ describe('session lifecycle', () => {
     expect(session.started_at).not.toBeNull();
     expect(session.ended_at).not.toBeNull();
     const attempts = await db.selectFrom('quiz_attempt').select(['user_id', 'finished_at']).where('session_id', '=', sessionId).execute();
-    // both players finished, so both have a completion time (the member's is earlier)
-    expect(attempts.find((a) => a.user_id === member.userId)!.finished_at).not.toBeNull();
+    // only the owner finished (which ended the session); the member was still playing — no completion time
     expect(attempts.find((a) => a.user_id === owner.userId)!.finished_at).not.toBeNull();
+    expect(attempts.find((a) => a.user_id === member.userId)!.finished_at).toBeNull();
     const answers = await db.selectFrom('user_answer as ua').innerJoin('quiz_attempt as a', 'a.attempt_id', 'ua.attempt_id')
       .select(['a.user_id', 'ua.selected_option_id']).where('a.session_id', '=', sessionId).execute();
-    expect(answers).toHaveLength(4); // every question answered by both players, no filler needed
-    expect(answers.filter((a) => a.selected_option_id === null)).toHaveLength(0);
+    // owner answered both; the member answered only Q1, so their unanswered Q2 is stored as a 0-point filler
+    expect(answers).toHaveLength(4);
+    expect(answers.filter((a) => a.selected_option_id === null)).toHaveLength(1);
     expect(outbox.filter((m) => /is starting/.test(m.subject))).toHaveLength(2);
 
     // results API: winner, reason, own answers and standings
@@ -212,25 +212,31 @@ describe('session lifecycle', () => {
     expect((await next<TimerSyncDto>(so, 'session:timer')).endsAt).toBe(started.endsAt);
   });
 
-  it('breaks a score tie by the earliest completion and flags exactly one winner', async () => {
-    const { so, sm, sessionId, q1o, q1m } = await startedGame([mcQuestion('Only', 100)]);
+  // Scenario C — equal scores: the player who finished first wins the tie by earliest completion.
+  it('breaks a score tie in favour of the player who completed earliest and flags exactly one winner', async () => {
+    const { owner, member, so, sm, sessionId, q1o, q1m } = await startedGame([mcQuestion('Q1', 100), mcQuestion('Q2', 100)]);
+    // the member answers Q1 correctly (100) and is left waiting on Q2
+    const q2mP = next<LiveQuestionDto>(sm, 'session:question');
+    expect((await answerOpt(sm, sessionId, q1m, 'annyeong')).data?.finished).toBe(false);
+    await q2mP;
+    // the owner answers Q1 correctly (100) then Q2 wrong (0) → finishes FIRST with 100, ending the session
+    const q2oP = next<LiveQuestionDto>(so, 'session:question');
+    await answerOpt(so, sessionId, q1o, 'annyeong');
     const doneO = next<GameEndDto>(so, 'session:completed');
     const doneM = next<GameEndDto>(sm, 'session:completed');
-    // both answer the only question correctly (100 each); the game ends once both have finished
-    const [ro, rm] = await Promise.all([answerOpt(so, sessionId, q1o, 'annyeong'), answerOpt(sm, sessionId, q1m, 'annyeong')]);
-    expect(ro.ok && rm.ok).toBe(true);
-    expect(ro.data?.finished && rm.data?.finished).toBe(true);
+    expect((await answerOpt(so, sessionId, await q2oP, 'gamsa')).data?.finished).toBe(true);
     const [eo, em] = await Promise.all([doneO, doneM]);
+    // both ended on 100 points; every client sees the same result and exactly one winner
     expect(eo).toEqual(em);
     expect(eo.reason).toBe('completed');
-    expect(eo.standings.filter((s) => s.isWinner)).toHaveLength(1);
     expect(eo.standings.every((s) => s.totalScore === 100)).toBe(true);
-    // the tie is broken deterministically by the earliest completion time, then the lowest user id
-    const attempts = await db.selectFrom('quiz_attempt').select(['user_id', 'finished_at']).where('session_id', '=', sessionId).execute();
-    const expected = attempts.slice().sort((a, b) => a.finished_at!.getTime() - b.finished_at!.getTime() || a.user_id - b.user_id)[0]!.user_id;
-    expect(eo.winner?.userId).toBe(expected);
+    expect(eo.standings.filter((s) => s.isWinner)).toHaveLength(1);
+    // the owner wins the tie: they completed (earliest completion) while the member never finished
+    expect(eo.winner?.userId).toBe(owner.userId);
+    expect(eo.standings.find((s) => s.userId === owner.userId)).toMatchObject({ finished: true, isWinner: true });
+    expect(eo.standings.find((s) => s.userId === member.userId)).toMatchObject({ finished: false, isWinner: false });
     const row = await db.selectFrom('quiz_session').select(['winner_user_id', 'session_status']).where('session_id', '=', sessionId).executeTakeFirstOrThrow();
-    expect(row).toEqual({ winner_user_id: expected, session_status: 'COMPLETED' });
+    expect(row).toEqual({ winner_user_id: owner.userId, session_status: 'COMPLETED' });
   });
 
   it('when the global time runs out first, the game ends and the highest score still wins', async () => {
@@ -288,24 +294,21 @@ describe('session lifecycle', () => {
     const back = await db.selectFrom('quiz_attempt').select('disconnected_at').where('attempt_id', '=', attempt.attempt_id).executeTakeFirstOrThrow();
     expect(back.disconnected_at).toBeNull();
 
-    // the reconnected member finishes all three questions (300 points) FIRST, but that alone does
-    // not end the game or win it — the owner still has questions left.
+    // the reconnected member now finishes all three questions (300 points) FIRST. Finishing first
+    // ends the session immediately — the owner is still on Q2 with only 100 points — yet the winner
+    // is decided by score, so the member's higher score wins.
     const q3mP = next<LiveQuestionDto>(again, 'session:question');
-    await answerOpt(again, sessionId, rejoin.data!.current, 'annyeong');
-    const memberFinish = await answerOpt(again, sessionId, await q3mP, 'annyeong');
-    expect(memberFinish.data?.finished).toBe(true);
-    await socketModule.engine.drain(sessionId);
-    expect(socketModule.engine.isLive(sessionId)).toBe(true);
-
-    // the owner finishes last with the lower score; the member's higher score still wins
-    const q3oP = next<LiveQuestionDto>(so, 'session:question');
-    await answerOpt(so, sessionId, ownerQ2, 'gamsa'); // Q2 wrong
+    await answerOpt(again, sessionId, rejoin.data!.current, 'annyeong'); // Q2
     const done = next<GameEndDto>(so, 'session:completed');
-    await answerOpt(so, sessionId, await q3oP, 'gamsa'); // Q3 wrong → owner finishes last
+    const memberFinish = await answerOpt(again, sessionId, await q3mP, 'annyeong'); // Q3 → finishes first
+    expect(memberFinish.data?.finished).toBe(true);
     const end = await done;
+    expect(end.reason).toBe('completed');
     expect(end.winner?.userId).toBe(member.userId);
-    expect(end.standings[0]).toMatchObject({ userId: member.userId, totalScore: 300, isWinner: true });
-    expect(end.standings[1]).toMatchObject({ userId: owner.userId, totalScore: 100 });
+    expect(end.standings[0]).toMatchObject({ userId: member.userId, totalScore: 300, isWinner: true, finished: true });
+    expect(end.standings[1]).toMatchObject({ userId: owner.userId, totalScore: 100, isWinner: false, finished: false });
+    // the owner can no longer answer the questions they had left
+    expect((await answerOpt(so, sessionId, ownerQ2, 'annyeong')).error?.code).toBe('session_ended');
   });
 
   it('schema migrations are idempotent on an up-to-date database', async () => {
@@ -416,6 +419,99 @@ describe('session lifecycle', () => {
   });
 });
 
+/**
+ * The first player to finish decides WHEN the session ends; the highest final score decides WHO
+ * wins. These two rules are independent, and these tests pin that down (scenarios A–E).
+ */
+describe('session termination (first finisher) vs winner determination (highest score)', () => {
+  // Scenario A — the first player to finish also holds the highest score, so they win.
+  it('A: the first player to finish wins when they also have the highest score', async () => {
+    const { owner, member, so, sm, sessionId, q1o, q1m } = await startedGame(); // Q1=100, Q2=50
+    // the member answers Q1 correctly (100) and is left on Q2 — they never finish
+    const q2mP = next<LiveQuestionDto>(sm, 'session:question');
+    await answerOpt(sm, sessionId, q1m, 'annyeong');
+    await q2mP;
+    // the owner answers Q1 (100) then Q2 (50) → finishes FIRST with 150, which ends the session
+    const q2oP = next<LiveQuestionDto>(so, 'session:question');
+    await answerOpt(so, sessionId, q1o, 'annyeong');
+    const doneO = next<GameEndDto>(so, 'session:completed');
+    const doneM = next<GameEndDto>(sm, 'session:completed');
+    expect((await answerOpt(so, sessionId, await q2oP, 'annyeong')).data?.finished).toBe(true);
+    const [eo, em] = await Promise.all([doneO, doneM]);
+    expect(eo).toEqual(em);
+    expect(eo.reason).toBe('completed');
+    expect(eo.winner?.userId).toBe(owner.userId);
+    expect(eo.standings.find((s) => s.userId === owner.userId)).toMatchObject({ totalScore: 150, isWinner: true, finished: true });
+    expect(eo.standings.find((s) => s.userId === member.userId)).toMatchObject({ totalScore: 100, isWinner: false, finished: false });
+  });
+
+  // Scenario B — the first player to finish does NOT win: a player with more points who has not
+  // finished still wins.
+  it('B: a higher score held by a player who has not finished beats the first finisher', async () => {
+    const { owner, member, so, sm, sessionId, q1o, q1m } = await startedGame(); // Q1=100, Q2=50
+    // the member answers Q1 correctly (100) and stays on Q2 — they never finish
+    const q2mP = next<LiveQuestionDto>(sm, 'session:question');
+    await answerOpt(sm, sessionId, q1m, 'annyeong');
+    await q2mP;
+    // the owner answers Q1 wrong (0) then Q2 correct (50) → finishes FIRST with only 50
+    const q2oP = next<LiveQuestionDto>(so, 'session:question');
+    await answerOpt(so, sessionId, q1o, 'gamsa');
+    const doneO = next<GameEndDto>(so, 'session:completed');
+    const doneM = next<GameEndDto>(sm, 'session:completed');
+    expect((await answerOpt(so, sessionId, await q2oP, 'annyeong')).data?.finished).toBe(true);
+    const [eo, em] = await Promise.all([doneO, doneM]);
+    expect(eo).toEqual(em);
+    expect(eo.reason).toBe('completed');
+    // the member wins with 100 even though the owner finished first (with 50)
+    expect(eo.winner?.userId).toBe(member.userId);
+    expect(eo.standings[0]).toMatchObject({ userId: member.userId, totalScore: 100, isWinner: true, finished: false });
+    expect(eo.standings.find((s) => s.userId === owner.userId)).toMatchObject({ totalScore: 50, isWinner: false, finished: true });
+    const row = await db.selectFrom('quiz_session').select(['winner_user_id', 'session_status']).where('session_id', '=', sessionId).executeTakeFirstOrThrow();
+    expect(row).toEqual({ winner_user_id: member.userId, session_status: 'COMPLETED' });
+  });
+
+  // Scenario D — once the first player finishes, the session is closed and further answers are rejected.
+  it('D: the server rejects any answer submitted after the session closes', async () => {
+    const { so, sm, sessionId, q1o, q1m } = await startedGame([mcQuestion('Only', 100)]); // single question
+    // the owner answers the only question → finishes FIRST → the session closes at once
+    const doneM = next<GameEndDto>(sm, 'session:completed');
+    expect((await answerOpt(so, sessionId, q1o, 'annyeong')).data?.finished).toBe(true);
+    await doneM;
+    await socketModule.engine.drain(sessionId);
+    expect(socketModule.engine.isLive(sessionId)).toBe(false);
+    // the member (who never answered) is rejected, and so is a repeated answer from the owner
+    expect((await answerOpt(sm, sessionId, q1m, 'annyeong')).error?.code).toBe('session_ended');
+    expect((await answerOpt(so, sessionId, q1o, 'annyeong')).error?.code).toBe('session_ended');
+    const row = await db.selectFrom('quiz_session').select('session_status').where('session_id', '=', sessionId).executeTakeFirstOrThrow();
+    expect(row.session_status).toBe('COMPLETED');
+  });
+
+  // Scenario E — every connected client receives the same final scores, ranking, status and winner.
+  it('E: all clients receive identical final scores, ranking, status and winner', async () => {
+    const { owner, member, so, sm, sessionId, q1o } = await startedGame(); // Q1=100, Q2=50
+    const doneO = next<GameEndDto>(so, 'session:completed');
+    const doneM = next<GameEndDto>(sm, 'session:completed');
+    // the owner races through both questions and finishes first, ending the session
+    const q2oP = next<LiveQuestionDto>(so, 'session:question');
+    await answerOpt(so, sessionId, q1o, 'annyeong');
+    await answerOpt(so, sessionId, await q2oP, 'annyeong');
+    const [eo, em] = await Promise.all([doneO, doneM]);
+    // both sockets get byte-for-byte the same end payload: same winner, ranking, scores and reason
+    expect(eo).toEqual(em);
+    expect(eo.winner?.userId).toBe(owner.userId);
+    expect(eo.standings.map((s) => [s.userId, s.totalScore, s.isWinner])).toEqual([
+      [owner.userId, 150, true],
+      [member.userId, 0, false],
+    ]);
+    // the authoritative results endpoint agrees for both players
+    const ro = await as(owner).get(`/api/sessions/${sessionId}/results`);
+    const rm = await as(member).get(`/api/sessions/${sessionId}/results`);
+    expect(ro.body).toMatchObject({ status: 'COMPLETED', endReason: 'completed', winner: { userId: owner.userId } });
+    expect(rm.body).toMatchObject({ status: 'COMPLETED', endReason: 'completed', winner: { userId: owner.userId } });
+    expect(ro.body.standings).toEqual(rm.body.standings);
+  });
+});
+
 /*
 =========================================================
 EXPLICACIÓN DEL ARCHIVO
@@ -425,12 +521,16 @@ Propósito: Pruebas del ciclo de vida de las partidas en tiempo real usando cone
 reales.
 
 Responsabilidades principales:
-- Partida completa: sala de espera, temporizador global, avance independiente de cada jugador,
-  ganador por mayor puntuación final (aunque otro termine antes) y clasificación final.
+- Partida completa: sala de espera, temporizador global, avance independiente de cada jugador. La
+  sesión termina en cuanto el PRIMER jugador contesta todas las preguntas; el ganador es el de
+  mayor puntuación final (que puede no ser quien terminó primero) y la clasificación final.
 - El temporizador global se inicia una sola vez, no se reinicia al cambiar de pregunta y se
   sincroniza con todos los jugadores (session:timer).
 - Empate de puntuación resuelto por finalización más temprana, con un único ganador.
-- Fin por tiempo agotado: gana la mayor puntuación; desconexión y reconexión sin declarar ganador.
+- Fin por tiempo agotado (nadie terminó): gana la mayor puntuación; desconexión y reconexión sin
+  declarar ganador.
+- Separación entre fin de sesión (primer jugador en terminar) y elección del ganador (mayor
+  puntuación): escenarios A–E.
 - Migraciones idempotentes.
 - Una sola sesión activa por sala; solo OWNER/ADMIN crea, inicia o cancela.
 - Desconexiones en la sala de espera y durante la partida.
@@ -439,7 +539,7 @@ Responsabilidades principales:
 - Bloqueo de preguntas jugadas para conservar el historial.
 
 Elementos importantes:
-- 13 casos de prueba
+- 17 casos de prueba
 - setup() (sala, miembro y cuestionario)
 
 Dependencias:
