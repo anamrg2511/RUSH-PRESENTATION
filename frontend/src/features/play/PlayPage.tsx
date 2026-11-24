@@ -205,7 +205,13 @@ function Game({ sessionId, roomId, quizTitle }: { sessionId: number; roomId: num
                 {t('play.correctAnswerWas', { a: phase.question.questionType === 'TRUE_FALSE' ? (r.correctAnswer === 'TRUE' ? t('common.true') : t('common.false')) : r.correctAnswer })}
               </p>
             )}
-            <p className="mt-8 font-display text-sm font-bold text-muted">{t('play.question', { i: phase.question.index + 1, n: phase.question.total })}</p>
+            {phase.question.index + 1 >= phase.question.total ? (
+              <p className="mt-8 flex items-center justify-center gap-2 font-display text-sm font-bold text-cyan">
+                <Spinner className="h-4 w-4" /> {t('play.waitingOthers')}
+              </p>
+            ) : (
+              <p className="mt-8 font-display text-sm font-bold text-muted">{t('play.question', { i: phase.question.index + 1, n: phase.question.total })}</p>
+            )}
             {game.timer && <ClockLine timer={game.timer} />}
           </div>
         </Card>
@@ -512,20 +518,20 @@ function FinalStandings({ end, meId, sessionId, roomId }: { end: GameEndDto; meI
   );
 }
 
-/** Who won (first to answer every question) or why there is no first-finisher winner (time up). */
+/** Announces the winner (the highest final score); notes when the game ended because time ran out. */
 export function WinnerBanner({ end, meId, className }: { end: Pick<GameEndDto, 'reason' | 'winner'>; meId: number; className?: string }) {
   const { t } = useI18n();
-  if (end.reason === 'first_finisher' && end.winner) {
+  if (end.winner) {
     return (
       <div className={cx('mx-auto max-w-lg rounded-2xl border-2 border-sun bg-sun/15 px-5 py-3 shadow-[0_0_0_1px_rgb(255_230_0/0.4),0_10px_30px_-8px_rgb(255_230_0/0.5)]', className)} role="status">
         <p className="font-display text-lg font-black text-sun">🏆 {end.winner.userId === meId ? t('play.youWin') : t('play.winnerIs', { name: end.winner.fullName })}</p>
-        {end.winner.userId !== meId && <p className="mt-1 text-sm font-semibold text-fg-soft">{t('play.endedByWinner')}</p>}
+        {end.reason === 'time_up' && <p className="mt-1 text-sm font-semibold text-fg-soft">{t('play.timeUpNote')}</p>}
       </div>
     );
   }
   return (
     <p className={cx('mx-auto max-w-lg rounded-2xl border-2 border-tangerine/60 bg-tangerine/10 px-5 py-3 font-display font-bold text-tangerine', className)} role="status">
-      ⏰ {t('play.timeUpNoWinner')}
+      ⏰ {t('play.noWinner')}
     </p>
   );
 }

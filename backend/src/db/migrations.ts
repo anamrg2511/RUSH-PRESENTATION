@@ -34,7 +34,7 @@ export async function runMigrations(db: Db): Promise<string[]> {
     applied.push('quiz.total_time_limit_seconds (backfilled from the per-question limits)');
   }
 
-  // 2026-11: first player to finish every question wins and ends the session.
+  // 2026-11: the session records its winning participant (the highest final score).
   if (!(await columnExists(db, 'quiz_session', 'winner_user_id'))) {
     await sql`ALTER TABLE quiz_session ADD COLUMN winner_user_id BIGINT UNSIGNED NULL AFTER ended_at`.execute(db);
     await sql`

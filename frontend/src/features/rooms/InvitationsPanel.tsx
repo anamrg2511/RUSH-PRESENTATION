@@ -1,34 +1,61 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import type { CreatedInvitationDto } from '@rush/shared';
 import { roomsApi } from '../../api/endpoints';
 import { useConfirm, useToast } from '../../components/overlays';
-import { Badge, Button, Card, ErrorState, FormError, LoadingState, SelectField, TextField } from '../../components/ui';
+import { Badge, Button, Card, ErrorState, FormError, LoadingState, TextField } from '../../components/ui';
 import { useI18n } from '../../i18n/I18nProvider';
 
-const EXPIRY_OPTIONS = [1, 24, 72, 168, 336, 720];
+/**
+ * Copies text to the clipboard. The Async Clipboard API is only available in secure contexts
+ * (HTTPS or localhost); on a LAN HTTP origin it is missing, so fall back to selecting a field and
+ * the legacy execCommand('copy'). Returns whether the copy succeeded.
+ */
+export async function copyToClipboard(text: string, field: HTMLInputElement | null): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      /* fall through to the legacy path */
+    }
+  }
+  const el = field ?? Object.assign(document.createElement('textarea'), { value: text });
+  if (!field) {
+    el.style.position = 'fixed';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+  }
+  try {
+    el.focus();
+    el.select();
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    if (!field) el.remove();
+  }
+}
 
 export function InvitationsPanel({ roomId }: { roomId: number }) {
-  const { t, formatDate, errorText } = useI18n();
+  const { t, errorText } = useI18n();
   const qc = useQueryClient();
   const confirm = useConfirm();
   const toast = useToast();
   const list = useQuery({ queryKey: ['room', roomId, 'invitations'], queryFn: () => roomsApi.invitations(roomId) });
-  const [hours, setHours] = useState(168);
   const [invitee, setInvitee] = useState('');
   const [created, setCreated] = useState<CreatedInvitationDto | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-
-  const label = (h: number) => (h < 24 ? t('inv.hours', { n: h }) : t('inv.days', { n: h / 24 }));
+  const linkRef = useRef<HTMLInputElement>(null);
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const inv = await roomsApi.createInvitation(roomId, { expiresInHours: hours, invitee: invitee.trim() || undefined });
+      const inv = await roomsApi.createInvitation(roomId, { invitee: invitee.trim() || undefined });
       setCreated(inv);
       setCopied(false);
       setInvitee('');
@@ -42,11 +69,13 @@ export function InvitationsPanel({ roomId }: { roomId: number }) {
 
   const copy = async () => {
     if (!created) return;
-    try {
-      await navigator.clipboard.writeText(created.url);
+    if (await copyToClipboard(created.url, linkRef.current)) {
       setCopied(true);
-    } catch {
-      /* clipboard unavailable: the link stays selectable */
+      toast(t('inv.copied'));
+    } else {
+      setCopied(false);
+      linkRef.current?.select();
+      toast(t('inv.copyFailed'), 'error');
     }
   };
 
@@ -55,13 +84,6 @@ export function InvitationsPanel({ roomId }: { roomId: number }) {
       <Card className="p-5 lg:col-span-2">
         <h3 className="mb-4 font-bold">{t('inv.create')}</h3>
         <form className="space-y-4" onSubmit={create}>
-          <SelectField label={t('inv.expiresIn')} value={hours} onChange={(e) => setHours(Number(e.target.value))}>
-            {EXPIRY_OPTIONS.map((h) => (
-              <option key={h} value={h}>
-                {label(h)}
-              </option>
-            ))}
-          </SelectField>
           <TextField label={t('inv.invitee')} value={invitee} onChange={(e) => setInvitee(e.target.value)} hint={t('inv.inviteeHint')} optional />
           <FormError error={error} />
           <Button type="submit" className="w-full" loading={busy}>
@@ -71,7 +93,7 @@ export function InvitationsPanel({ roomId }: { roomId: number }) {
         {created && (
           <div className="mt-5 rounded-xl border border-lime/40 bg-lime/10 p-3" data-no-translate>
             <p className="text-sm font-semibold text-lime">{t('inv.created')}</p>
-            <input readOnly value={created.url} onFocus={(e) => e.currentTarget.select()} className="mt-2 w-full rounded-lg border border-lime/40 bg-panel-2 px-2 py-1.5 font-mono text-xs" aria-label="Invitation link" />
+            <input ref={linkRef} readOnly value={created.url} onFocus={(e) => e.currentTarget.select()} className="mt-2 w-full rounded-lg border border-lime/40 bg-panel-2 px-2 py-1.5 font-mono text-xs" aria-label="Invitation link" />
             <Button size="sm" variant="secondary" className="mt-2" onClick={copy}>
               {copied ? t('common.copied') : t('common.copy')}
             </Button>
@@ -93,7 +115,7 @@ export function InvitationsPanel({ roomId }: { roomId: number }) {
                 <div className="min-w-0 text-sm">
                   <p className="font-medium">{i.invitedUsername ? t('inv.for', { name: `@${i.invitedUsername}` }) : t('inv.open')}</p>
                   <p className="text-muted">
-                    {i.expired ? <Badge tone="red">{t('inv.expired')}</Badge> : t('inv.expires', { date: formatDate(i.expiresAt, true) })} · @{i.createdByUsername}
+                    {i.expired && <Badge tone="red">{t('inv.expired')}</Badge>} @{i.createdByUsername}
                   </p>
                 </div>
                 <Button
@@ -128,13 +150,15 @@ EXPLICACIÓN DEL ARCHIVO
 Propósito: Panel para crear, listar y revocar enlaces de invitación de una sala.
 
 Responsabilidades principales:
-- Elegir la validez (de 1 hora a 30 días) y opcionalmente un destinatario registrado.
-- Mostrar una sola vez el enlace creado y permitir copiarlo.
+- Opcionalmente dirigir el enlace a un destinatario registrado (la caducidad es fija y la fija el
+  servidor; no se muestra en la interfaz).
+- Mostrar una sola vez el enlace creado y permitir copiarlo (con copia de respaldo para orígenes
+  HTTP de red local, donde la API de portapapeles no está disponible).
 - Listar invitaciones (activas o caducadas) y revocarlas.
 
 Elementos importantes:
 - InvitationsPanel({ roomId })
-- EXPIRY_OPTIONS
+- copyToClipboard(text, field)
 
 Dependencias:
 - @tanstack/react-query

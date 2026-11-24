@@ -62,7 +62,7 @@ const answerOpt = (s: Socket, sessionId: number, q: LiveQuestionDto, text: strin
   emit<{ accepted: true; result: QuestionEndDto; finished: boolean }>(s, 'session:answer', { sessionId, questionId: q.questionId, answer: { kind: 'option', optionId: optionId(q, text) } });
 
 describe('session lifecycle', () => {
-  it('runs a full game: lobby → global timer → players advance independently → first finisher wins', async () => {
+  it('runs a full game: lobby → global timer → players advance independently → highest score wins', async () => {
     const { owner, member, outsider, roomId, quizId, sessionId } = await setup();
     const so = await sock(owner);
     const sm = await sock(member);
@@ -120,49 +120,60 @@ describe('session lifecycle', () => {
     expect(q2.endsAt).toBe(st.endsAt);
     expect(socketModule.engine.deadlineOf(sessionId)).toBe(st.endsAt);
 
-    // the member answers both questions wrong but finishes first → wins and ends the game for everybody
+    // the member races through both questions wrong and finishes FIRST (0 points). Finishing first
+    // must NOT win and must NOT end the game: the owner still has a question left.
     const q2mP = next<LiveQuestionDto>(sm, 'session:question');
     expect((await answerOpt(sm, sessionId, q1b, 'gamsa')).data?.finished).toBe(false);
     const q2m = await q2mP;
     expect(q2m.endsAt).toBe(st.endsAt);
+    const memberDone = await answerOpt(sm, sessionId, q2m, 'gamsa');
+    expect(memberDone.data?.finished).toBe(true);
+    // the game keeps running and there is no winner yet, because the owner has not finished
+    await socketModule.engine.drain(sessionId);
+    expect(socketModule.engine.isLive(sessionId)).toBe(true);
+    expect(await db.selectFrom('quiz_session').select(['winner_user_id', 'session_status']).where('session_id', '=', sessionId).executeTakeFirstOrThrow())
+      .toEqual({ winner_user_id: null, session_status: 'IN_PROGRESS' });
+
+    // the owner answers Q2 correctly and finishes LAST with the higher score (150) → the owner wins
     const doneO = next<GameEndDto>(so, 'session:completed');
     const doneM = next<GameEndDto>(sm, 'session:completed');
-    const last = await answerOpt(sm, sessionId, q2m, 'gamsa');
+    const last = await answerOpt(so, sessionId, q2, 'annyeong');
     expect(last.ok).toBe(true);
     expect(last.data?.finished).toBe(true);
     const [endO, endM] = await Promise.all([doneO, doneM]);
     expect(endO).toEqual(endM); // everybody receives the same final results
-    expect(endO.reason).toBe('first_finisher');
-    expect(endO.winner).toMatchObject({ userId: member.userId, username: member.username });
-    // first-finisher rule takes priority over score: winner listed first with 0 points
+    expect(endO.reason).toBe('completed');
+    expect(endO.winner).toMatchObject({ userId: owner.userId, username: owner.username });
+    // highest final score wins even though the member finished first; the winner is listed first
     expect(endO.standings.map((s) => [s.userId, s.totalScore, s.isWinner, s.finished])).toEqual([
-      [member.userId, 0, true, true],
-      [owner.userId, 100, false, false],
+      [owner.userId, 150, true, true],
+      [member.userId, 0, false, true],
     ]);
 
     // nobody can answer after the game ended
-    expect((await answerOpt(so, sessionId, q2, 'annyeong')).error?.code).toBe('session_ended');
+    expect((await answerOpt(sm, sessionId, q2m, 'gamsa')).error?.code).toBe('session_ended');
 
     // durable record
     const session = await db.selectFrom('quiz_session').selectAll().where('session_id', '=', sessionId).executeTakeFirstOrThrow();
-    expect(session).toMatchObject({ session_status: 'COMPLETED', winner_user_id: member.userId });
+    expect(session).toMatchObject({ session_status: 'COMPLETED', winner_user_id: owner.userId });
     expect(session.started_at).not.toBeNull();
     expect(session.ended_at).not.toBeNull();
     const attempts = await db.selectFrom('quiz_attempt').select(['user_id', 'finished_at']).where('session_id', '=', sessionId).execute();
+    // both players finished, so both have a completion time (the member's is earlier)
     expect(attempts.find((a) => a.user_id === member.userId)!.finished_at).not.toBeNull();
-    expect(attempts.find((a) => a.user_id === owner.userId)!.finished_at).toBeNull();
+    expect(attempts.find((a) => a.user_id === owner.userId)!.finished_at).not.toBeNull();
     const answers = await db.selectFrom('user_answer as ua').innerJoin('quiz_attempt as a', 'a.attempt_id', 'ua.attempt_id')
       .select(['a.user_id', 'ua.selected_option_id']).where('a.session_id', '=', sessionId).execute();
-    expect(answers).toHaveLength(4); // includes the empty row for the owner's unanswered Q2 (A-10)
-    expect(answers.filter((a) => a.selected_option_id === null)).toHaveLength(1);
+    expect(answers).toHaveLength(4); // every question answered by both players, no filler needed
+    expect(answers.filter((a) => a.selected_option_id === null)).toHaveLength(0);
     expect(outbox.filter((m) => /is starting/.test(m.subject))).toHaveLength(2);
 
     // results API: winner, reason, own answers and standings
     const res = await as(owner).get(`/api/sessions/${sessionId}/results`);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: 'COMPLETED', endReason: 'first_finisher', winner: { userId: member.userId }, myTotalScore: 100, maxScore: 150 });
-    expect(res.body.standings[0]).toMatchObject({ userId: member.userId, isWinner: true });
-    expect(res.body.myAnswers.map((a: { isCorrect: boolean }) => a.isCorrect)).toEqual([true, false]);
+    expect(res.body).toMatchObject({ status: 'COMPLETED', endReason: 'completed', winner: { userId: owner.userId }, myTotalScore: 150, maxScore: 150 });
+    expect(res.body.standings[0]).toMatchObject({ userId: owner.userId, isWinner: true });
+    expect(res.body.myAnswers.map((a: { isCorrect: boolean }) => a.isCorrect)).toEqual([true, true]);
     expect((await as(outsider).get(`/api/sessions/${sessionId}/results`)).status).toBe(404);
     const history = await as(member).get(`/api/rooms/${roomId}/sessions`);
     expect(history.body[0]).toMatchObject({ sessionId, myScore: 0, participantCount: 2 });
@@ -201,47 +212,49 @@ describe('session lifecycle', () => {
     expect((await next<TimerSyncDto>(so, 'session:timer')).endsAt).toBe(started.endsAt);
   });
 
-  it('two players finishing at nearly the same moment produce exactly one winner', async () => {
-    const { owner, member, so, sm, sessionId, q1o, q1m } = await startedGame([mcQuestion('Only', 100)]);
+  it('breaks a score tie by the earliest completion and flags exactly one winner', async () => {
+    const { so, sm, sessionId, q1o, q1m } = await startedGame([mcQuestion('Only', 100)]);
     const doneO = next<GameEndDto>(so, 'session:completed');
     const doneM = next<GameEndDto>(sm, 'session:completed');
+    // both answer the only question correctly (100 each); the game ends once both have finished
     const [ro, rm] = await Promise.all([answerOpt(so, sessionId, q1o, 'annyeong'), answerOpt(sm, sessionId, q1m, 'annyeong')]);
-    const oks = [ro, rm].filter((r) => r.ok);
-    expect(oks).toHaveLength(1);
-    expect(oks[0]!.data?.finished).toBe(true);
-    expect([ro, rm].find((r) => !r.ok)!.error?.code).toBe('session_ended');
-    const winnerId = ro.ok ? owner.userId : member.userId;
+    expect(ro.ok && rm.ok).toBe(true);
+    expect(ro.data?.finished && rm.data?.finished).toBe(true);
     const [eo, em] = await Promise.all([doneO, doneM]);
-    expect(eo.winner?.userId).toBe(winnerId);
-    expect(em.winner?.userId).toBe(winnerId);
+    expect(eo).toEqual(em);
+    expect(eo.reason).toBe('completed');
     expect(eo.standings.filter((s) => s.isWinner)).toHaveLength(1);
+    expect(eo.standings.every((s) => s.totalScore === 100)).toBe(true);
+    // the tie is broken deterministically by the earliest completion time, then the lowest user id
+    const attempts = await db.selectFrom('quiz_attempt').select(['user_id', 'finished_at']).where('session_id', '=', sessionId).execute();
+    const expected = attempts.slice().sort((a, b) => a.finished_at!.getTime() - b.finished_at!.getTime() || a.user_id - b.user_id)[0]!.user_id;
+    expect(eo.winner?.userId).toBe(expected);
     const row = await db.selectFrom('quiz_session').select(['winner_user_id', 'session_status']).where('session_id', '=', sessionId).executeTakeFirstOrThrow();
-    expect(row).toEqual({ winner_user_id: winnerId, session_status: 'COMPLETED' });
-    const finished = await db.selectFrom('quiz_attempt').select('user_id').where('session_id', '=', sessionId).where('finished_at', 'is not', null).execute();
-    expect(finished.map((f) => f.user_id)).toEqual([winnerId]);
+    expect(row).toEqual({ winner_user_id: expected, session_status: 'COMPLETED' });
   });
 
-  it('when the global time runs out first, the game ends with no first-finisher winner and score ranking', async () => {
+  it('when the global time runs out first, the game ends and the highest score still wins', async () => {
     socketModule.engine.timeScale = 0.02; // 60 s → 1.2 s
     const { owner, member, so, sm, sessionId, q1o, q1m, started } = await startedGame(undefined, 60);
     expect(started.totalTimeLimitSeconds).toBe(60);
-    await answerOpt(so, sessionId, q1o, 'annyeong'); // owner: 100 points, then stops
+    await answerOpt(so, sessionId, q1o, 'annyeong'); // owner: 100 points, then stops (never finishes)
     const doneO = next<GameEndDto>(so, 'session:completed', 5000);
     const doneM = next<GameEndDto>(sm, 'session:completed', 5000);
     const [eo, em] = await Promise.all([doneO, doneM]);
     expect(Date.now()).toBeGreaterThanOrEqual(started.endsAt);
     expect(eo).toEqual(em);
     expect(eo.reason).toBe('time_up');
-    expect(eo.winner).toBeNull();
-    expect(eo.standings.map((s) => [s.userId, s.totalScore, s.isWinner])).toEqual([[owner.userId, 100, false], [member.userId, 0, false]]);
+    // nobody answered every question, but the owner has the highest score and still wins
+    expect(eo.winner).toMatchObject({ userId: owner.userId });
+    expect(eo.standings.map((s) => [s.userId, s.totalScore, s.isWinner])).toEqual([[owner.userId, 100, true], [member.userId, 0, false]]);
     expect((await answerOpt(sm, sessionId, q1m, 'annyeong')).error?.code).toBe('session_ended');
     const row = await db.selectFrom('quiz_session').select(['winner_user_id', 'session_status']).where('session_id', '=', sessionId).executeTakeFirstOrThrow();
-    expect(row).toEqual({ winner_user_id: null, session_status: 'COMPLETED' });
+    expect(row).toEqual({ winner_user_id: owner.userId, session_status: 'COMPLETED' });
     // every unanswered question is recorded with 0 points (A-10): 2 players × 2 questions in total
     const n = await db.selectFrom('user_answer as ua').innerJoin('quiz_attempt as a', 'a.attempt_id', 'ua.attempt_id').select('ua.user_answer_id').where('a.session_id', '=', sessionId).execute();
     expect(n).toHaveLength(4);
     const res = await as(member).get(`/api/sessions/${sessionId}/results`);
-    expect(res.body).toMatchObject({ endReason: 'time_up', winner: null });
+    expect(res.body).toMatchObject({ endReason: 'time_up', winner: { userId: owner.userId } });
   });
 
   it('a disconnect never declares a winner; the player can reconnect and resume with the remaining time', async () => {
@@ -262,7 +275,8 @@ describe('session lifecycle', () => {
     // the owner keeps playing
     const q2oP = next<LiveQuestionDto>(so, 'session:question');
     await answerOpt(so, sessionId, q1o, 'annyeong');
-    expect((await q2oP).index).toBe(1);
+    const ownerQ2 = await q2oP;
+    expect(ownerQ2.index).toBe(1);
 
     // reconnect: same progress (Q2), same global deadline, disconnected_at cleared
     const again = await sock(member);
@@ -274,11 +288,20 @@ describe('session lifecycle', () => {
     const back = await db.selectFrom('quiz_attempt').select('disconnected_at').where('attempt_id', '=', attempt.attempt_id).executeTakeFirstOrThrow();
     expect(back.disconnected_at).toBeNull();
 
-    // the reconnected member finishes first and wins
+    // the reconnected member finishes all three questions (300 points) FIRST, but that alone does
+    // not end the game or win it — the owner still has questions left.
     const q3mP = next<LiveQuestionDto>(again, 'session:question');
     await answerOpt(again, sessionId, rejoin.data!.current, 'annyeong');
+    const memberFinish = await answerOpt(again, sessionId, await q3mP, 'annyeong');
+    expect(memberFinish.data?.finished).toBe(true);
+    await socketModule.engine.drain(sessionId);
+    expect(socketModule.engine.isLive(sessionId)).toBe(true);
+
+    // the owner finishes last with the lower score; the member's higher score still wins
+    const q3oP = next<LiveQuestionDto>(so, 'session:question');
+    await answerOpt(so, sessionId, ownerQ2, 'gamsa'); // Q2 wrong
     const done = next<GameEndDto>(so, 'session:completed');
-    await answerOpt(again, sessionId, await q3mP, 'annyeong');
+    await answerOpt(so, sessionId, await q3oP, 'gamsa'); // Q3 wrong → owner finishes last
     const end = await done;
     expect(end.winner?.userId).toBe(member.userId);
     expect(end.standings[0]).toMatchObject({ userId: member.userId, totalScore: 300, isWinner: true });
@@ -403,11 +426,11 @@ reales.
 
 Responsabilidades principales:
 - Partida completa: sala de espera, temporizador global, avance independiente de cada jugador,
-  ganador por terminar primero y clasificación final.
+  ganador por mayor puntuación final (aunque otro termine antes) y clasificación final.
 - El temporizador global se inicia una sola vez, no se reinicia al cambiar de pregunta y se
   sincroniza con todos los jugadores (session:timer).
-- Dos jugadores que terminan casi a la vez producen un único ganador.
-- Fin por tiempo agotado sin ganador; desconexión y reconexión sin declarar ganador.
+- Empate de puntuación resuelto por finalización más temprana, con un único ganador.
+- Fin por tiempo agotado: gana la mayor puntuación; desconexión y reconexión sin declarar ganador.
 - Migraciones idempotentes.
 - Una sola sesión activa por sala; solo OWNER/ADMIN crea, inicia o cancela.
 - Desconexiones en la sala de espera y durante la partida.

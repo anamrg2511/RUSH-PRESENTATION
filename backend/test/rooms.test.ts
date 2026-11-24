@@ -127,7 +127,7 @@ describe('invitations', () => {
   it('stores only the SHA-256 hash of the token', async () => {
     const owner = await registerUser();
     const roomId = await createRoom(owner);
-    const inv = await as(owner).post(`/api/rooms/${roomId}/invitations`, { expiresInHours: 2 });
+    const inv = await as(owner).post(`/api/rooms/${roomId}/invitations`, {});
     expect(inv.status).toBe(201);
     expect(inv.body.url).toContain(inv.body.token);
     const row = await db.selectFrom('room_invitation').selectAll().where('invitation_id', '=', inv.body.invitationId).executeTakeFirstOrThrow();
@@ -173,12 +173,20 @@ describe('invitations', () => {
     expect((await as(user).get(`/api/invitations/${token}`)).status).toBe(410);
   });
 
-  it('rejects unknown tokens and invalid expiry ranges', async () => {
+  it('rejects unknown tokens and fixes expiry at exactly one hour, ignoring client input', async () => {
     const owner = await registerUser();
     const roomId = await createRoom(owner);
     expect((await as(owner).get('/api/invitations/does-not-exist-token-000000')).status).toBe(404);
-    expect((await as(owner).post(`/api/rooms/${roomId}/invitations`, { expiresInHours: 0 })).status).toBe(400);
-    expect((await as(owner).post(`/api/rooms/${roomId}/invitations`, { expiresInHours: 24 * 31 })).status).toBe(400);
+    // The client cannot choose or extend the validity period: it is always one hour from the
+    // server-side creation time, even if a different duration is sent.
+    const inv = await as(owner).post(`/api/rooms/${roomId}/invitations`, { expiresInHours: 24 * 31 });
+    expect(inv.status).toBe(201);
+    const row = await db
+      .selectFrom('room_invitation')
+      .select(['created_at', 'expires_at'])
+      .where('invitation_id', '=', inv.body.invitationId)
+      .executeTakeFirstOrThrow();
+    expect(row.expires_at.getTime() - row.created_at.getTime()).toBe(3600_000);
   });
 
   it('targeted invitations email the invitee and cannot be used by others', async () => {

@@ -15,9 +15,11 @@ import { describeCorrectAnswer, getSessionRow, loadStandings, winnerOf } from '.
  * Rules:
  * - One global deadline per session (quiz.total_time_limit_seconds), set once when the game starts
  *   and never reset. Each player advances through the questions at their own pace.
- * - The first player to answer every question wins and immediately ends the game for everybody.
- * - If the deadline passes first, the game ends with no first-finisher winner and the standings use
- *   the existing scoring system.
+ * - The game ends when every participant has answered every question, or when the deadline passes,
+ *   whichever comes first. One player finishing does not end the game for the others.
+ * - The winner is the participant with the highest final score. Ties are broken by the earliest
+ *   completion time, then by the lowest user id, so the result is deterministic and
+ *   server-authoritative. Answering first never overrides a higher score.
  */
 
 export interface Emitter {
@@ -275,7 +277,7 @@ export class SessionEngine {
       const durationMs = s.totalTimeLimitSeconds * 1000 * this.timeScale;
       s.endsAt = Date.now() + durationMs;
       s.timer = setTimeout(() => {
-        void this.run(s, () => this.finish(s, 'time_up', null)).catch((e) => console.error('[session] time up', e));
+        void this.run(s, () => this.finish(s, 'time_up')).catch((e) => console.error('[session] time up', e));
       }, durationMs + ANSWER_GRACE_MS);
       s.syncTimer = setInterval(() => {
         if (s.status === 'IN_PROGRESS') this.emitter.toSession(s.sessionId, 'session:timer', this.timerState(s));
@@ -294,7 +296,8 @@ export class SessionEngine {
 
   /**
    * A player answers their current question. Each player sees only their own result and then gets
-   * their next question; answering the last question first wins the game for everybody.
+   * their next question; answering the last question marks them finished but lets the others keep
+   * playing. The winner is decided by final score once everyone is done (or the deadline passes).
    */
   async answer(sessionId: number, userId: number, questionId: number, submission: AnswerSubmission): Promise<{ accepted: true; result: QuestionEndDto; finished: boolean }> {
     const s = this.sessions.get(sessionId);
@@ -355,10 +358,13 @@ export class SessionEngine {
       this.emitter.toUser(s.sessionId, userId, 'session:question-end', result);
 
       if (p.index === s.questions.length - 1) {
-        // Last question: this player is the first to finish (the queue serialises answers, and
-        // finish() re-checks the status with a conditional UPDATE), so they win and end the game.
+        // This player answered the last question. Record their completion time (used to break score
+        // ties) but keep the game running so everyone else can finish — the winner is decided by the
+        // final scores in finish(), not by who finished first. The game ends only once everybody is
+        // done; otherwise the global deadline ends it.
         p.finishedAt = new Date();
-        await this.finish(s, 'first_finisher', p);
+        for (const q of s.questions) p.answered.add(q.questionId);
+        if (this.allFinished(s)) await this.finish(s, 'completed');
         return { accepted: true as const, result, finished: true };
       }
       p.index += 1;
@@ -378,18 +384,42 @@ export class SessionEngine {
     }
   }
 
+  /** Every participant still in the session has answered all of their questions. */
+  private allFinished(s: LiveSession): boolean {
+    for (const p of s.participants.values()) if (!p.finishedAt) return false;
+    return true;
+  }
+
+  /**
+   * The winner is the attempt with the highest total score. Ties are broken by the earliest
+   * completion time (players who never finished rank last), then by the lowest user id, so the
+   * result is deterministic. Runs after writeTotals, so total_score is already persisted.
+   */
+  private async determineWinner(sessionId: number): Promise<number | null> {
+    const rows = await db
+      .selectFrom('quiz_attempt')
+      .select(['user_id', 'total_score', 'finished_at'])
+      .where('session_id', '=', sessionId)
+      .execute();
+    if (rows.length === 0) return null;
+    const completion = (at: Date | null) => (at ? at.getTime() : Number.POSITIVE_INFINITY);
+    rows.sort((a, b) => b.total_score - a.total_score || completion(a.finished_at) - completion(b.finished_at) || a.user_id - b.user_id);
+    return rows[0]!.user_id;
+  }
+
   /**
    * Ends the game for everybody, exactly once. The conditional UPDATE (… WHERE session_status =
-   * 'IN_PROGRESS') is the atomic guard: only one caller can move the session to COMPLETED and set
-   * winner_user_id, even if two final answers or the deadline arrive at the same moment.
+   * 'IN_PROGRESS') is the atomic guard: only one caller can move the session to COMPLETED, even if
+   * a final answer and the deadline arrive at the same moment. The winner is then decided from the
+   * persisted scores, so it never depends on who finished first.
    */
-  private async finish(s: LiveSession, reason: GameEndReason, winner: Participant | null): Promise<void> {
+  private async finish(s: LiveSession, reason: GameEndReason): Promise<void> {
     if (s.status !== 'IN_PROGRESS') return;
     s.status = 'COMPLETED';
     this.stopTimers(s);
     const res = await db
       .updateTable('quiz_session')
-      .set({ session_status: 'COMPLETED', ended_at: new Date(), winner_user_id: winner?.userId ?? null })
+      .set({ session_status: 'COMPLETED', ended_at: new Date() })
       .where('session_id', '=', s.sessionId)
       .where('session_status', '=', 'IN_PROGRESS')
       .executeTakeFirst();
@@ -397,7 +427,10 @@ export class SessionEngine {
       this.sessions.delete(s.sessionId);
       return;
     }
-    if (winner) await db.updateTable('quiz_attempt').set({ finished_at: winner.finishedAt }).where('attempt_id', '=', winner.attemptId).execute();
+    // Persist each finisher's completion time; it breaks score ties when the winner is chosen.
+    for (const p of s.participants.values()) {
+      if (p.finishedAt) await db.updateTable('quiz_attempt').set({ finished_at: p.finishedAt }).where('attempt_id', '=', p.attemptId).execute();
+    }
     // A-10: questions a player did not answer are stored as empty 0-point answers (complete history).
     const missing = [...s.participants.values()].flatMap((p) =>
       s.questions.filter((q) => !p.answered.has(q.questionId)).map((q) => ({ attempt_id: p.attemptId, question_id: q.questionId, is_correct: false, points_earned: 0 })),
@@ -405,7 +438,11 @@ export class SessionEngine {
     if (missing.length > 0) await db.insertInto('user_answer').values(missing).execute();
     for (const p of s.participants.values()) for (const q of s.questions) p.answered.add(q.questionId);
     await this.writeTotals(s);
-    const standings = await loadStandings(s.sessionId, winner?.userId ?? null);
+    const winnerUserId = await this.determineWinner(s.sessionId);
+    if (winnerUserId !== null) {
+      await db.updateTable('quiz_session').set({ winner_user_id: winnerUserId }).where('session_id', '=', s.sessionId).execute();
+    }
+    const standings = await loadStandings(s.sessionId, winnerUserId);
     const payload: GameEndDto = { sessionId: s.sessionId, reason, winner: winnerOf(standings), standings };
     this.emitter.toSession(s.sessionId, 'session:completed', payload);
     this.sessions.delete(s.sessionId);
@@ -536,7 +573,7 @@ EXPLICACIÓN DEL ARCHIVO
 
 Propósito: Implementa el motor autoritativo de las partidas multijugador: sala de espera, inicio,
 temporizador global del cuestionario, avance de cada jugador a su ritmo, corrección, ganador por
-terminar primero, puntuación y resultados.
+mayor puntuación final, puntuación y resultados.
 
 Responsabilidades principales:
 - join: un miembro de la sala entra en la sala de espera (se crea su quiz_attempt). Durante la
@@ -547,12 +584,16 @@ Responsabilidades principales:
   setTimeout para el fin del tiempo y un setInterval que reenvía la fecha límite (session:timer).
 - answer: valida que la pregunta sea la actual de ese jugador y que no haya pasado el tiempo
   global; corrige con gradeAnswer, guarda user_answer, envía al jugador su resultado
-  (session:question-end) y su siguiente pregunta (session:question). Si era la última pregunta, ese
-  jugador gana y la partida termina para todos.
+  (session:question-end) y su siguiente pregunta (session:question). Si era la última pregunta,
+  marca a ese jugador como terminado (finishedAt) pero los demás siguen jugando; la partida termina
+  cuando todos han terminado o cuando vence el tiempo global.
 - finish: termina la partida una sola vez. El UPDATE condicional (WHERE session_status =
-  'IN_PROGRESS') garantiza un único ganador aunque dos jugadores terminen a la vez. Guarda
-  winner_user_id y finished_at, registra con 0 puntos las preguntas no contestadas, calcula
-  total_score y emite session:completed con el motivo, el ganador y la clasificación.
+  'IN_PROGRESS') garantiza que una sola llamada cierra la sesión aunque una respuesta final y el
+  vencimiento del tiempo coincidan. Guarda finished_at, registra con 0 puntos las preguntas no
+  contestadas, calcula total_score y determina el ganador por mayor puntuación final (desempate por
+  menor finished_at y luego menor user_id). Emite session:completed con el motivo, el ganador y la
+  clasificación.
+- determineWinner: ganador autoritativo a partir de las puntuaciones ya persistidas.
 - cancel: cierra la sesión como CANCELLED.
 - disconnect: en la sala de espera elimina al jugador; durante la partida solo marca
   disconnected_at (puede reconectarse; una desconexión nunca da la victoria a nadie).

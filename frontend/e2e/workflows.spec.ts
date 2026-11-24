@@ -48,7 +48,7 @@ test('register, log out and log back in', async ({ page }) => {
   await expect(page.getByRole('heading', { name: /Hi, E2E/ })).toBeVisible();
 });
 
-test('host and player: room, invitation, quiz, global timer, first finisher wins', async ({ browser }) => {
+test('host and player: room, invitation, quiz, global timer, highest score wins', async ({ browser }) => {
   const hostCtx = await browser.newContext();
   const playerCtx = await browser.newContext();
   const host = await hostCtx.newPage();
@@ -118,7 +118,7 @@ test('host and player: room, invitation, quiz, global timer, first finisher wins
   await expect(player.getByRole('heading', { name: 'Waiting room' })).toBeVisible();
   await expect(host.getByText('Players (2)')).toBeVisible();
   await expect(player.getByRole('button', { name: /Start game/ })).toHaveCount(0); // members cannot start
-  for (const p of [host, player]) await expect(p.getByText('2 min for the whole quiz · the first player to answer every question wins')).toBeVisible();
+  for (const p of [host, player]) await expect(p.getByText('2 min for the whole quiz · the highest score wins')).toBeVisible();
 
   await host.getByRole('button', { name: /Start game/ }).click();
   for (const p of [host, player]) {
@@ -127,11 +127,11 @@ test('host and player: room, invitation, quiz, global timer, first finisher wins
     await expect(p.getByText('of 2 min')).toBeVisible();
   }
 
-  // host answers the first question wrong and stays there
+  // host answers the first question wrong, then moves on to the second question
   await host.getByRole('radio', { name: /Wrong answer/ }).click();
   await host.getByRole('button', { name: 'Submit answer' }).click();
   await expect(host.getByRole('heading', { name: 'Not quite' })).toBeVisible();
-  await expect(host.getByText('Correct answer: Right answer')).toBeVisible();
+  await expect(host.getByRole('heading', { name: 'Second question?' })).toBeVisible();
 
   // the player advances independently; the global timer keeps running (it does not restart at 2:00)
   await player.getByRole('radio', { name: /Right answer/ }).click();
@@ -141,16 +141,23 @@ test('host and player: room, invitation, quiz, global timer, first finisher wins
   await expect(player.getByRole('timer')).not.toHaveText('2:00');
   await expect(player.getByRole('timer')).toHaveText(/^1:\d\d$/);
 
-  // the player answers the last question first → wins and the game ends for everybody
+  // the player answers the last question first (200 points) and finishes, but finishing first must
+  // NOT win or end the game: the host still has a question left
   await player.getByRole('radio', { name: /Yes/ }).click();
   await player.getByRole('button', { name: 'Submit answer' }).click();
+  await expect(player.getByText('You finished! Waiting for the other players…')).toBeVisible();
+  await expect(host.getByRole('heading', { name: 'Game over' })).toHaveCount(0);
+
+  // the host finishes last with the lower score → the player's higher score wins
+  await host.getByRole('radio', { name: /No/ }).click();
+  await host.getByRole('button', { name: 'Submit answer' }).click();
   for (const p of [host, player]) await expect(p.getByRole('heading', { name: 'Game over' })).toBeVisible();
-  await expect(player.getByText('You finished first — you win!')).toBeVisible();
-  await expect(host.getByText(`E2E ${playerName} finished first and wins!`)).toBeVisible();
+  await expect(player.getByText('You have the highest score — you win!')).toBeVisible();
+  await expect(host.getByText(`E2E ${playerName} wins with the highest score!`)).toBeVisible();
   await expect(host.getByRole('button', { name: 'Submit answer' })).toHaveCount(0); // no more interaction
   await player.getByRole('link', { name: 'See my results' }).click();
   await expect(player.getByText('Your score')).toBeVisible();
-  await expect(player.getByText('You finished first — you win!')).toBeVisible();
+  await expect(player.getByText('You have the highest score — you win!')).toBeVisible();
   await expect(player.getByText(/^200/).first()).toBeVisible();
 
   // the session appears in the room history

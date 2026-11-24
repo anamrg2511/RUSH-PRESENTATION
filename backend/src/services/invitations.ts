@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { CreatedInvitationDto, InvitationDto, InvitationPreviewDto } from '@rush/shared';
+import { LIMITS } from '@rush/shared';
 import type { invitationCreateSchema } from '@rush/shared';
 import type { z } from 'zod';
 import { env } from '../config/env';
@@ -44,7 +45,8 @@ export async function createInvitation(
   const token = newToken();
   const now = new Date();
   now.setMilliseconds(0);
-  const expiresAt = new Date(now.getTime() + input.expiresInHours * 3600_000);
+  // Expiry is fixed at one hour from the server-side creation time; the client cannot influence it.
+  const expiresAt = new Date(now.getTime() + LIMITS.invitationTtlHours * 3600_000);
   const res = await db
     .insertInto('room_invitation')
     .values({

@@ -292,7 +292,7 @@ One real-time play of a quiz inside a room, started by an OWNER/ADMIN who acts a
 | `created_at` | DATETIME |  | NO | DEFAULT CURRENT_TIMESTAMP |
 | `started_at` | DATETIME |  | YES |  |
 | `ended_at` | DATETIME |  | YES |  |
-| `winner_user_id` | BIGINT UNSIGNED | FK → user.user_id | YES | ON DELETE SET NULL; the first participant who answered every question. NULL when the global time limit expired first or the session was cancelled. Added 2026-11. |
+| `winner_user_id` | BIGINT UNSIGNED | FK → user.user_id | YES | ON DELETE SET NULL; the participant with the highest final score (ties broken by the earliest `finished_at`, then the lowest user id). NULL when the session was cancelled or had no participants. Added 2026-11. |
 | `active_flag` | TINYINT |  | YES | STORED GENERATED: `IF(session_status IN ('WAITING','IN_PROGRESS'), 1, NULL)`; STORED generated helper: 1 while the session is active, NULL otherwise. UNIQUE(room_id, active_flag) => one active session per room. (Not derived from room_id: InnoDB rejects a generated column whose base column is a cascading FK.) |
 
 * UNIQUE `uq_quiz_session_one_active` (room_id, active_flag)
@@ -386,7 +386,7 @@ A user's personal vocabulary entry (also the translation history). Personal data
 * UNIQUE `uq_saved_word_user_translation` (user_id, translation_id)
 * App rule: Search and export are queries over saved_word JOIN translation_cache.
 
-### Schema changes (2026-11): global quiz timer and first-finisher winner
+### Schema changes (2026-11): global quiz timer and highest-score winner
 
 * `quiz.total_time_limit_seconds`, `quiz_session.winner_user_id` (FK `fk_quiz_session_winner_user_id`,
   ON DELETE SET NULL) and `quiz_attempt.finished_at` were added. `question.time_limit_seconds` is kept

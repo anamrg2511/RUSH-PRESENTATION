@@ -60,8 +60,9 @@ export async function getSessionRow(sessionId: number) {
 }
 
 /**
- * Final standings of a session. The first-finisher rule takes priority: the winner (if any) is
- * listed first; everybody else is ranked by score with the existing scoring system.
+ * Final standings of a session, ranked by score (highest first). The winner — the highest final
+ * score, ties broken by earliest completion — is flagged and listed first so every client shows the
+ * same order.
  */
 export async function loadStandings(sessionId: number, winnerUserId: number | null): Promise<StandingDto[]> {
   const rows = await db
@@ -98,8 +99,9 @@ export async function getSessionResult(sessionId: number, userId: number): Promi
   if (!myAttempt && !(await getMembershipRole(s.room_id, userId))) throw notFound('Session');
 
   const standings = await loadStandings(sessionId, s.winner_user_id);
+  // 'completed' when every participant answered all questions; otherwise the deadline ended it.
   const endReason: GameEndReason | null =
-    s.session_status !== 'COMPLETED' ? null : s.winner_user_id !== null ? 'first_finisher' : 'time_up';
+    s.session_status !== 'COMPLETED' ? null : standings.every((x) => x.finished) ? 'completed' : 'time_up';
 
   // Max score = points of the questions actually played in this session (locked, so stable).
   const played = await sql<{ total: number | null }>`
@@ -238,8 +240,8 @@ recuperación tras un reinicio.
 
 Responsabilidades principales:
 - createSession: solo OWNER/ADMIN; el cuestionario debe estar en la sala, publicado y con preguntas.
-- loadStandings: clasificación final; el ganador por terminar primero va en primer lugar y el resto
-  se ordena por puntuación.
+- loadStandings: clasificación final ordenada por puntuación; el ganador (mayor puntuación, desempate
+  por finalización más temprana) se marca y va en primer lugar.
 - getSessionResult: ganador, motivo de fin, clasificación, puntuación máxima jugada y las respuestas propias del usuario.
 - listRoomSessions y listMySessions: historial.
 - cancelOrphanedSessions: marca como CANCELLED las sesiones activas al arrancar.

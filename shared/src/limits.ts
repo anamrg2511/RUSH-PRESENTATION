@@ -16,9 +16,7 @@ export const LIMITS = {
   minQuizTimeLimitSeconds: 60,
   maxQuizTimeLimitSeconds: 3600,
   defaultQuizTimeLimitSeconds: 300,
-  invitationDefaultHours: 24 * 7, // A-4
-  invitationMinHours: 1,
-  invitationMaxHours: 24 * 30,
+  invitationTtlHours: 1, // A-4: invitation links are valid for exactly one hour (server-enforced)
   maxVideoHeight: 720,
   maxVideoWidth: 1280,
   maxImageBytes: 5 * 1024 * 1024,

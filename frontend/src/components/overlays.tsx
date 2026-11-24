@@ -6,13 +6,18 @@ import { Button, cx } from './ui';
 /** Accessible modal: role=dialog, Escape closes, focus moves inside and returns afterwards. */
 export function Modal({ open, onClose, title, children, wide }: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; wide?: boolean }) {
   const panel = useRef<HTMLDivElement>(null);
+  // Read onClose through a ref so the focus/Escape effect below depends only on `open`.
+  // Callers pass an inline onClose, so depending on it would re-run this effect on every
+  // parent render (i.e. every keystroke) and steal focus back to the first field.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement as HTMLElement | null;
     const focusable = panel.current?.querySelector<HTMLElement>('input, textarea, select, button:not([data-close])');
     (focusable ?? panel.current)?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
     document.addEventListener('keydown', onKey);
     document.body.style.overflow = 'hidden';
@@ -21,7 +26,7 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
       document.body.style.overflow = '';
       previous?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-night/75 p-0 backdrop-blur-sm sm:items-center sm:p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>

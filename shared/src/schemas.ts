@@ -62,12 +62,7 @@ export const roomInputSchema = z.object({
 export const roomUpdateSchema = roomInputSchema.partial();
 
 export const invitationCreateSchema = z.object({
-  expiresInHours: z
-    .number()
-    .int()
-    .min(LIMITS.invitationMinHours)
-    .max(LIMITS.invitationMaxHours)
-    .default(LIMITS.invitationDefaultHours),
+  // The validity period is fixed at one hour and set server-side; clients cannot choose or extend it.
   /** username or email of a registered user; omitted for an open link */
   invitee: z.string().trim().min(1).max(255).optional(),
 });

@@ -8,7 +8,7 @@ import { useI18n } from '../../i18n/I18nProvider';
 
 export function InvitePage() {
   const token = useParams().token ?? '';
-  const { t, formatDate } = useI18n();
+  const { t } = useI18n();
   const nav = useNavigate();
   const qc = useQueryClient();
   const preview = useQuery({ queryKey: ['invitation', token], queryFn: () => invitationsApi.preview(token), retry: false });
@@ -52,9 +52,7 @@ export function InvitePage() {
         <p className="text-sm font-semibold uppercase tracking-wide text-pink">{t('inv.joinTitle')}</p>
         <h1 className="mt-1 text-2xl font-extrabold">{p.roomName}</h1>
         {p.roomDescription && <p className="mt-2 text-fg-soft">{p.roomDescription}</p>}
-        <p className="mt-3 text-sm text-muted">
-          {t('rooms.memberCount', { n: p.memberCount, max: 40 })} · {t('inv.expires', { date: formatDate(p.expiresAt, true) })}
-        </p>
+        <p className="mt-3 text-sm text-muted">{t('rooms.memberCount', { n: p.memberCount, max: 40 })}</p>
         <div className="mt-6">
           <FormError error={error} />
           {p.alreadyMember ? (

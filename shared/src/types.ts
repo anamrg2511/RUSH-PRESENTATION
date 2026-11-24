@@ -207,7 +207,7 @@ export interface StandingDto {
   disconnected: boolean;
   /** answered every question */
   finished: boolean;
-  /** the first player to answer every question */
+  /** the participant with the highest final score (ties broken by earliest completion) */
   isWinner: boolean;
 }
 export interface WinnerDto {
@@ -216,10 +216,10 @@ export interface WinnerDto {
   fullName: string;
 }
 /**
- * Why a session ended: 'first_finisher' = a player answered every question first (that player wins);
- * 'time_up' = the global time limit expired before anybody finished (no first-finisher winner).
+ * Why a session ended: 'completed' = every participant answered all questions before the deadline;
+ * 'time_up' = the global time limit expired first. The winner is the highest final score either way.
  */
-export type GameEndReason = 'first_finisher' | 'time_up';
+export type GameEndReason = 'completed' | 'time_up';
 /** Sent to everybody when the game ends. */
 export interface GameEndDto {
   sessionId: number;

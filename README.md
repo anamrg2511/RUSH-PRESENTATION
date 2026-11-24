@@ -31,9 +31,9 @@ Further documentation:
 * **Accounts:** registration, login with username or email, logout, profile (name, username, picture URL, description, learning language), password change, account deletion. Email addresses cannot be changed.
 * **Preferences:** target language for word translations. The interface is English-only (the language buttons and the *Interface language* field are kept in the layout but do not change the language).
 * **Private rooms:** up to 10 owned rooms per user, up to 40 members per room, topics (predefined and custom), member roles (owner, admin, member), leaving and removing members.
-* **Invitations:** expiring links (1 hour – 30 days), open or addressed to a registered user, revocable; only a hash of each token is stored.
+* **Invitations:** expiring links (valid for one hour, enforced on the server), open or addressed to a registered user, revocable; only a hash of each token is stored.
 * **Quizzes:** personal library (up to 15 quizzes), draft/published status, collaborators who can edit content, quizzes reusable across rooms, up to 25 questions per quiz with points, order and one image, and one total time limit for the whole quiz (1–60 minutes).
-* **Live sessions:** waiting room, one server-side global timer for the whole quiz (it never resets between questions), players advance through the questions at their own pace, answers graded on the server, per-player feedback after each answer, **the first player to answer every question wins and ends the game for everybody** (if time runs out first there is no first-finisher winner and the standings use the scores), reconnection to a running game, final standings and a results page with each player's own answers; one active session per room.
+* **Live sessions:** waiting room, one server-side global timer for the whole quiz (it never resets between questions), players advance through the questions at their own pace, answers graded on the server, per-player feedback after each answer, **the player with the highest final score wins** (the game ends when everyone has finished or the global time runs out; finishing first never overrides a higher score, and ties are broken by the earliest completion time), reconnection to a running game, final standings and a results page with each player's own answers; one active session per room.
 * **History:** session history per room and per user; questions that have recorded answers are locked so past results stay consistent.
 * **Translation and vocabulary:** single-word EN↔KO translation (Google Cloud Translation) followed by a contextual explanation (OpenAI), shared translation cache, personal vocabulary with notes, favourites and search.
 * **Notifications:** emails for invitations, member removal, quizzes added to a room and session start.
@@ -44,17 +44,19 @@ Further documentation:
 1. The quiz creator sets **one total time limit for the whole quiz** (1–60 minutes, default 5) in the
    *Details* panel of the quiz editor. Questions have no time limit of their own.
 2. An owner or admin starts a session; members join the waiting room, which shows the total time and
-   the rule "the first player to answer every question wins".
+   the rule "the highest score wins".
 3. When the host starts the game, the server sets a single deadline. Every player sees the same
    countdown (`m:ss`, "of 5 min"); it keeps running and never restarts when a player moves to the
    next question.
 4. Each player answers at their own pace and briefly sees their own result after each answer.
-5. **The first player to answer every question wins and the game ends immediately for everybody**,
-   regardless of score. The server decides; two near-simultaneous finishes produce exactly one winner.
-6. If the time runs out first, the game ends with no first-finisher winner and the standings are
-   ranked by score (correct answers earn the question's points, speed earns nothing extra).
-7. Everybody sees the winner (or the time-up notice) and the final standings; the results page shows
-   each player's own answers. A player who loses the connection keeps their progress and can rejoin.
+5. **The player with the highest final score wins.** The game ends once every player has answered
+   all of their questions, or when the global time runs out — whichever comes first. Finishing first
+   never overrides a higher score. The server decides; ties are broken by the earliest completion
+   time, so there is always exactly one winner.
+6. If the time runs out first, the game ends and the standings are ranked by score (correct answers
+   earn the question's points, speed earns nothing extra); the highest score still wins.
+7. Everybody sees the same winner and final standings; the results page shows each player's own
+   answers. A player who loses the connection keeps their progress and can rejoin.
 
 ## Technology stack
 
@@ -230,7 +232,7 @@ Then run `npm start -w backend` and serve `frontend/dist` from a web server that
 ## REAL-TIME MULTIPLAYER — SETUP AND HOW TO PLAY
 
 RUSH! already includes a complete real-time multiplayer game (waiting room, one global timer,
-live play, reconnection, first-finisher winner and final standings) over Socket.IO. Nothing in
+live play, reconnection, highest-score winner and final standings) over Socket.IO. Nothing in
 the game has to be built; this section only explains how to run it so **two players on two
 computers on the same Wi-Fi** can play the same session.
 
@@ -371,7 +373,7 @@ with the remaining global time.
 |---|---|
 | `npm run typecheck` | TypeScript checks for all workspaces |
 | `npm test` | Unit and integration tests: shared (15), backend (75, against `DB_TEST_NAME`, created automatically) and frontend (12) |
-| `npm run test:e2e` | Playwright end-to-end tests (8): landing page, authentication, a complete two-player live game (global timer, first finisher wins), translation and vocabulary, the English-only interface, and the presentation-version restrictions |
+| `npm run test:e2e` | Playwright end-to-end tests (8): landing page, authentication, a complete two-player live game (global timer, highest score wins), translation and vocabulary, the English-only interface, and the presentation-version restrictions |
 
 The end-to-end tests start their own backend (port 4100) and frontend (port 5174) and reset a
 disposable database whose name must end in `_e2e` (default `rush_e2e`). For this installation:
@@ -417,8 +419,8 @@ winner and standings), `session:cancelled` and `session:removed`.
   called directly.
 * Login sessions and live-game timers are kept in memory: restarting the backend logs users out and
   cancels running games. A single backend process is assumed.
-* A running game continues until someone finishes or the global time expires, even if every player
-  disconnects (they can rejoin); the host can cancel it from the room.
+* A running game continues until every player has finished or the global time expires, even if every
+  player disconnects (they can rejoin); the host can cancel it from the room.
 * The three columns added for the global timer and the winner (`quiz.total_time_limit_seconds`,
   `quiz_session.winner_user_id`, `quiz_attempt.finished_at`) were added directly to
   `database/rush_schema.sql`; `generator/generate_rush_model.py` and `database/RUSH_ERD.mdj` do not
