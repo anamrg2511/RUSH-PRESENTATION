@@ -10,6 +10,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Bind to every network interface so a second computer on the same Wi-Fi can open
+    // http://<this-computer-LAN-IP>:5173 (needed for two-computer multiplayer; see README).
+    host: true,
     // Same-origin API: the session cookie and Socket.IO work without CORS.
     proxy: {
       '/api': { target: API, changeOrigin: false },

@@ -227,6 +227,144 @@ Then run `npm start -w backend` and serve `frontend/dist` from a web server that
 `/media` and `/socket.io` to the backend (with `NODE_ENV=production`, HTTPS and a strong
 `SESSION_SECRET`).
 
+## REAL-TIME MULTIPLAYER — SETUP AND HOW TO PLAY
+
+RUSH! already includes a complete real-time multiplayer game (waiting room, one global timer,
+live play, reconnection, first-finisher winner and final standings) over Socket.IO. Nothing in
+the game has to be built; this section only explains how to run it so **two players on two
+computers on the same Wi-Fi** can play the same session.
+
+### How it works (read this first)
+
+The live game state lives **in memory inside a single backend process**. So only **one computer —
+the host — runs the project (backend + frontend + MySQL)**, and **both players open the host's
+address in their browser**. Two separate installations would be two independent games with two
+separate databases and could not share a session.
+
+Your teammate does **not** need to clone or run the project to play with you — they only need the
+host's URL and their own account (they register at that URL). The GitHub download matters only if
+they later want to host a game themselves.
+
+```
+Host computer                                         Teammate computer
+┌───────────────────────────────┐                    ┌───────────────────────┐
+│ MySQL (Docker)                 │                    │                       │
+│ backend  (port 4000)           │  same Wi-Fi LAN    │ Browser               │
+│ frontend (Vite, port 5173) ◄───┼────────────────────┤ http://<HOST-IP>:5173 │
+│ Browser http://<HOST-IP>:5173  │                    │                       │
+└───────────────────────────────┘                    └───────────────────────┘
+```
+
+Everything (REST API, `/socket.io` WebSocket and `/media`) is proxied through the single Vite port
+**5173**, so only that one port has to be reachable from the other computer.
+
+### 1. Required software (host only)
+
+Node.js 20+, npm 10+ and Docker Desktop (for MySQL), as in [Prerequisites](#prerequisites). The
+teammate only needs a web browser.
+
+### 2–5. One-time setup on the host
+
+```bash
+npm install
+cp .env.example .env     # Windows PowerShell: Copy-Item .env.example .env
+npm run db:up            # start MySQL in Docker
+npm run db:init          # create the schema
+npm run db:seed          # OPTIONAL demo data (users ana/ben/cho, password rush-demo-1234)
+```
+
+Find the host's LAN IP address — **PowerShell:** `ipconfig` → read the **IPv4 Address** of your
+Wi-Fi adapter (e.g. `192.168.1.42`). Then edit `.env` and set **both** URLs to that IP on port
+5173, and set a translation provider so lookups do not error during the demo:
+
+```ini
+APP_URL=http://192.168.1.42:5173
+PUBLIC_API_URL=http://192.168.1.42:5173
+SESSION_SECRET=<a long random string>
+TRANSLATION_PROVIDER=mock
+```
+
+> Why: `APP_URL` is the address written into invitation links and the allowed request origin;
+> `PUBLIC_API_URL` is the base for media URLs and the allowed Socket.IO origin. Pointing both at
+> `http://<HOST-IP>:5173` makes the invitation link open on the teammate's computer and lets the
+> WebSocket connect. With the default `localhost` values the second computer cannot connect.
+
+### 6. Start the servers on the host
+
+```bash
+npm run dev
+```
+
+This starts the backend on port 4000 and the Vite frontend on port 5173, bound to all network
+interfaces (`host: true` in `frontend/vite.config.ts`) so the other computer can reach it.
+
+Verify the backend is up and accepting connections (from the host):
+
+```bash
+curl http://localhost:4000/api/health          # -> {"ok":true}
+```
+
+From the **teammate's** computer, open `http://<HOST-IP>:5173` in a browser: the RUSH! landing
+page should load. If it does, HTTP and WebSocket (same origin/port) both work.
+
+### Windows Firewall and network
+
+- Both computers must be on the **same Wi-Fi network** (and the network profile set to **Private**,
+  not Public, or Windows blocks incoming connections).
+- The first time `npm run dev` runs, Windows Defender Firewall usually shows **"Allow Node.js to
+  communicate on these networks"** — tick **Private networks** and click **Allow access**.
+- If no prompt appeared and the teammate cannot load the page, add an inbound rule for port 5173
+  (run PowerShell **as Administrator** on the host):
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "RUSH 5173" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5173 -Profile Private
+  ```
+
+- Quick check from the teammate's machine: `ping <HOST-IP>` should succeed; if the browser still
+  cannot connect, the firewall or a "Public" network profile is the usual cause.
+
+### 7. Play — Player 1 (host)
+
+1. Open `http://<HOST-IP>:5173` and **log in / register** with your own account.
+2. You need a **published quiz with at least one question**. Either log in as a seeded user
+   (`ana` / `rush-demo-1234`) who already has one, or go to **Quizzes → New quiz**, add a question,
+   and press **Publish**.
+3. Go to **Rooms → Create room** and open the new room.
+4. In the room, **Add quiz** and pick your published quiz.
+5. Open the **Invitations** tab → set an expiry → **Create**, then **Copy** the invitation link
+   (it looks like `http://<HOST-IP>:5173/invite/<token>`). Send it to your teammate (WhatsApp,
+   chat, email…).
+6. Wait until your teammate appears in the room's **Members** list (the page refreshes itself).
+7. On your quiz, press **Start session** — you are taken to the **Waiting room**.
+
+### 8. Play — Player 2 (teammate)
+
+1. Open the invitation link your teammate sent, in a browser on the other computer.
+2. If not signed in, you are sent to the login page — **register your own account** (or log in),
+   and you are returned to the invitation automatically.
+3. Accept the invitation to **join the room**.
+4. When the host starts the session, open the room and click **Open session** (a banner appears
+   while the session is waiting), which takes you to the same **Waiting room**.
+
+### 9–11. Start and play
+
+With both players in the waiting room, the host presses **Start game**. Both players answer at
+their own pace; the first to finish every question wins and ends the game for everyone, or time
+runs out. Both then see the winner and the final standings; each player's own answers are on the
+results page. If a browser briefly loses Wi-Fi, it reconnects and resumes at the same question
+with the remaining global time.
+
+### 12. Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Teammate's browser cannot open `http://<HOST-IP>:5173` | Same Wi-Fi? Network profile **Private**? Firewall rule for 5173 added? `ipconfig` IP still correct (it can change)? |
+| Page loads but actions fail with "Cross-origin request blocked" | `APP_URL`/`PUBLIC_API_URL` in the host `.env` are not `http://<HOST-IP>:5173`, or the host is using the `localhost` URL instead of the IP. Both players must use the **same** `http://<HOST-IP>:5173` address. Restart `npm run dev` after editing `.env`. |
+| Invitation link points at `localhost` | `APP_URL` was not changed to the host IP before the link was created. Fix `.env`, restart, create a new link. |
+| "This invitation link has expired" / wrong user | Create a new link; a link addressed to a specific user only works for that account. |
+| Translation popup says "not configured" | Set `TRANSLATION_PROVIDER=mock` in `.env` and restart. |
+| Everyone logged out / game cancelled after restarting the backend | Expected: sessions and timers are in memory (a single backend process is assumed). Start a new session. |
+
 ## Tests
 
 | Command | Scope |
